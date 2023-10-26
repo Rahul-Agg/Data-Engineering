@@ -11,7 +11,7 @@ import json
 import requests
 # ps.set_option('compute.max_rows', None)
 os.environ['PYSPARK_SUBMIT_ARGS'] = '--packages org.apache.iceberg:iceberg-spark-runtime-3.4_2.12:1.3.1,org.apache.spark:spark-streaming-kafka-0-10_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.0,org.apache.hadoop:hadoop-aws:3.3.4,com.mysql:mysql-connector-j:8.0.33 pyspark-shell'
-
+ 
 MINIO_ACCESS_KEY = "admin"
 MINIO_SECRET_KEY = "password"
 # Create a SparkSession
@@ -30,16 +30,17 @@ spark = SparkSession.builder \
     .config('spark.hadoop.fs.s3a.aws.credentials.provider', 'org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider') \
     .config('spark.hadoop.fs.s3a.impl','org.apache.hadoop.fs.s3a.S3AFileSystem') \
     .getOrCreate()
-
-
+ 
+ 
+ 
 partition_function_mapping = {
-    "months": "date", 
-    "years":"date", 
-    "days":"date", 
-    "hours":"hour", 
+    "months": "date",
+    "years":"date",
+    "days":"date",
+    "hours":"hour",
     "bucket":"bucket"
 }
-
+ 
 mysql_to_iceberg_spark_typemapping = {
     "longtext": "string",
     "bigint": "long",
@@ -79,16 +80,19 @@ mysql_to_iceberg_spark_typemapping = {
     "point":"string",
     "timestamp":"timestamp"
     }
-
-
-
+ 
+def get_curr_datetime():
+    current_date_time_df = spark.sql("SELECT current_timestamp() as current_time").select(date_format("current_time", "dd HH:mm:ss"))
+    current_time_value = current_date_time_df.first()[0]
+    return current_time_value
+ 
 def get_iceberg_schema_df(catalog,schema,table):
     df = spark.sql(f'Describe  {catalog}.{schema}.{table}')
     df = df.filter((~df.col_name.rlike('Part .*')))
     df = df.filter((~df.col_name.rlike('#.*')))
     df = df.filter((df.col_name != '' ))
     return df
-
+ 
 def add_deleted_column_with_null(schema_df, data_df):
     df = schema_df.collect()
     for row in df:
@@ -96,17 +100,17 @@ def add_deleted_column_with_null(schema_df, data_df):
         if col_name not in data_df.columns:
             data_df= data_df.withColumn(col_name,lit(None))  
     return data_df
-
+ 
 def get_function_and_column_name_from_partition_spec(value):
     function = None
     if "(" in value:
         function = value[0:value.find("(")].strip()
     if "months" == function or "days" == function or "years" == function or "hours" == function:
-        return partition_function_mapping.get(function),value[value.find("(")+1:value.find(")")].strip() 
+        return partition_function_mapping.get(function),value[value.find("(")+1:value.find(")")].strip()
     elif "bucket" == function:
         return partition_function_mapping.get(function), value[value.find("(")+1:value.find(")")].split(",")[1].strip()
     return None,None
-
+ 
 def get_partition_key_and_function(table_name):
     result = []
     df =spark.sql(f"describe {catalog}.{db}.{table_name}")
@@ -118,7 +122,7 @@ def get_partition_key_and_function(table_name):
         if column_name:
             result.append([function,column_name])
     return result
-
+ 
 def create_table(table_name, columns, partition_column, key):
     properties_query= f"""
                 TBLPROPERTIES (
@@ -142,7 +146,7 @@ def create_table(table_name, columns, partition_column, key):
     else:
         partition_query = f""" PARTITIONED BY (__rds_id) """
     spark.sql(table_query + partition_query + properties_query)
-
+ 
 def schema_setter(df, schema,key):
     typeMapping = {
             "boolean": BooleanType(),
@@ -235,7 +239,7 @@ def schema_setter(df, schema,key):
 #                 elif column_info['type'].lower() == "boolean":
 #                     df = df.withColumn(column_info['field'], when(col(column_info['field']) == True,1).otherwise(0).cast(IntegerType()))
     return df, schema_info, partition_column
-
+ 
 def merge_to_table(df, table, columns, key, partition_key, partition_function):
     df._jdf.sparkSession().sql(f"refresh {table}")
     # columns.remove("__op")
@@ -253,16 +257,16 @@ def merge_to_table(df, table, columns, key, partition_key, partition_function):
     if partition_key is not None:
         df = df.orderBy(partition_key)
         if partition_key == key:
-            merge_query = """MERGE INTO """+catalog+"."+db+"."+table+""" t USING (select * from """+ temp_table_name +""") s 
+            merge_query = """MERGE INTO """+catalog+"."+db+"."+table+""" t USING (select * from """+ temp_table_name +""") s
                                             on """ + " t.__rds_id = s.__rds_id and t.__tenant_id = s.__tenant_id and t."""+key+""" = s."""+key
         elif partition_key:
-            merge_query = """MERGE INTO """+catalog+"."+db+"."+table+""" t USING (select * from """+  temp_table_name +""") s 
+            merge_query = """MERGE INTO """+catalog+"."+db+"."+table+""" t USING (select * from """+  temp_table_name +""") s
                                                 on """+partition_function + "(t."+partition_key+")"+f""" = {partition_function}( s."""+partition_key+""") and t.__rds_id = s.__rds_id and t.__tenant_id = s.__tenant_id and t."""+key+""" = s."""+key
         else:
-            merge_query = """MERGE INTO """+catalog+"."+db+"."+table+""" t USING (select * from """+  temp_table_name +""") s 
+            merge_query = """MERGE INTO """+catalog+"."+db+"."+table+""" t USING (select * from """+  temp_table_name +""") s
                                                 on """ + " t.__rds_id = s.__rds_id and t.__tenant_id = s.__tenant_id and t."""+key+""" = s."""+key
     elif partition_key is None and key is not None:
-        merge_query = """MERGE INTO """+catalog+"."+db+"."+table+""" t USING (select * from """+ temp_table_name +""") s 
+        merge_query = """MERGE INTO """+catalog+"."+db+"."+table+""" t USING (select * from """+ temp_table_name +""") s
                                             on t."""+key+""" = s."""+key + " and t.__rds_id = s.__rds_id and t.__tenant_id = s.__tenant_id"
     merge_query += """
                                             WHEN MATCHED AND s.__op = 'd' THEN DELETE
@@ -274,7 +278,7 @@ def merge_to_table(df, table, columns, key, partition_key, partition_function):
     exception = None
     df.show()
     print(merge_query)
-    for x in range(10): 
+    for x in range(10):
         try:
             df.createOrReplaceTempView(temp_table_name)
             df._jdf.sparkSession().sql(merge_query)
@@ -286,7 +290,7 @@ def merge_to_table(df, table, columns, key, partition_key, partition_function):
             exception = e
             sleep(10)
     raise Exception(table + ' db: ' + db  + ' ' +str(exception))
-
+ 
 def add_multitenant_columns(df, columns):
     df = df.withColumn("__tenant_id", regexp_extract(col('__db'), '(\\d+)', 1).cast(IntegerType()))
     df = df.withColumn("__rds_id", regexp_extract(col('__topic'), '(\\d+)', 1).cast(IntegerType()))
@@ -296,18 +300,16 @@ def add_multitenant_columns(df, columns):
     columns['__op'] = "string"
     columns['__dp_update_ts'] = 'timestamp'
     return df, columns
-
+ 
 def add_columns(db,name,cols,df):
     existing_columns = set(spark.sql(f"describe {catalog}.{db}.{name}").select('col_name').rdd.flatMap(lambda x: x).collect())
     for col in cols:
         if col.lower() not in existing_columns:
             col_type = dict(df.dtypes)[col]
             spark.sql("ALTER TABLE "+catalog+"."+db+"."+name+" ADD COLUMN "+col+" "+col_type)
-
+ 
 def process_for_table(df, table):
-    current_date_time_df = spark.sql("SELECT current_timestamp() as current_time").select(date_format("current_time", "dd HH:mm:ss"))
-    current_time_value = current_date_time_df.first()[0]
-    print(f""" Dataframe processing start for - {table} at {current_time_value} """)
+    print(f""" Dataframe processing start for - {table} at {get_curr_datetime()} """)
     data = df.filter(df.__table == table)
     if df.isEmpty():
         return
@@ -334,7 +336,7 @@ def process_for_table(df, table):
     for column in final_df.columns:
         # For handling boolean in glaucus
         if dict(final_df.dtypes)[column] == 'boolean' or dict(final_df.dtypes)[column] == 'smallint':
-            final_df = final_df.withColumn(column, col(column).cast("int")) 
+            final_df = final_df.withColumn(column, col(column).cast("int"))
     if table not in table_list :
         create_table(table, tbl_cols, partition_column, key)
     else:
@@ -346,19 +348,15 @@ def process_for_table(df, table):
     if result is not None:
         partition_key = result[0][1]
         partition_function= result[0][0]
-
-    current_date_time_df = spark.sql("SELECT current_timestamp() as current_time").select(date_format("current_time", "dd HH:mm:ss"))
-    current_time_value = current_date_time_df.first()[0]
-    
-    print(f""" Dataframe processing end for - {table} at {current_time_value} """)
-    print(f""" Dataframe merging start for - {table} at {current_time_value} """)
+    print(f""" Dataframe processing end for - {table} at {get_curr_datetime()} """)
+    print(f""" Dataframe merging start for - {table} at {get_curr_datetime()} """)
     merge_to_table(final_df, table, columns, key, partition_key, partition_function)
     # execute_compaction(db, table)
-    print(f""" Dataframe merging end for - {table} at {current_time_value()} """)
-
+    print(f""" Dataframe merging end for - {table} at {get_curr_datetime()} """)
+ 
     # print(f"Completed job for table {table}")
-
-
+ 
+ 
 def read_from_kafka(subscribe_pattern):
     df = spark \
         .readStream \
@@ -371,8 +369,8 @@ def read_from_kafka(subscribe_pattern):
         .option("failOnDataLoss", "false") \
         .load()
     return df
-
-
+ 
+ 
 def write_to_sink(df, checkpoint_location):
     df \
         .withColumn("key", col("key").cast(StringType())) \
@@ -390,9 +388,7 @@ def write_to_sink(df, checkpoint_location):
         .start().awaitTermination()
     
 def df_to_sink(df, batch_id=None):
-    current_date_time_df = spark.sql("SELECT current_timestamp() as current_time").select(date_format("current_time", "dd HH:mm:ss"))
-    current_time_value = current_date_time_df.first()[0]
-    print(f""" Reading end from kafka for - {subscribe_pattern} at {current_time_value} """)
+    print(f""" Reading end from kafka for - {subscribe_pattern} at {get_curr_datetime()} """)
     df = df.cache()
     df = df.dropna(subset=['__op', 'value', '__table', '__db'])
     if df.isEmpty():
@@ -400,14 +396,12 @@ def df_to_sink(df, batch_id=None):
     table = df.select('__table').collect()[0][0]
     
     process_for_table(df, table)
-
+ 
 def run_job(subscribe_pattern, checkpoint_location):
-    current_date_time_df = spark.sql("SELECT current_timestamp() as current_time").select(date_format("current_time", "dd HH:mm:ss"))
-    current_time_value = current_date_time_df.first()[0]
-    print(f""" Reading start from kafka for - {subscribe_pattern} at {current_time_value} """)
+    print(f""" Reading start from kafka for - {subscribe_pattern} at {get_curr_datetime()} """)
     stream = read_from_kafka(subscribe_pattern)
     write_to_sink(stream, checkpoint_location)
-
+ 
 def execute_compaction(schema, table, full=False):
     print(f'Optimization for {schema}.{table} started.')
     with engine.connect() as cur:
@@ -427,9 +421,9 @@ def execute_compaction(schema, table, full=False):
         finally:
             print(f'Optimization for {schema}.{table} done.')
             return None
-
+        
 if __name__ == '__main__':
-
+ 
     # ids = ['2','3','1']
     ids = ['1']
     patterns = ['oms']
@@ -442,42 +436,28 @@ if __name__ == '__main__':
     db = "glaucus_oms"
     for id_number in ids:
         for pattern in patterns:
-
+ 
             SUBSCRIBE_PATTERN = f'source_glaucus{id_number}.{pattern}[\\d]*'
             db = f"glaucus_{pattern}"
             CHECKPOINT_LOCATION = LAKE_PATH + "kafka-checkpoints/" + db + id_number
-
+ 
             spark.sql(f"""CREATE DATABASE IF NOT EXISTS iceberg.{db}""")
-            current_date_time_df = spark.sql("SELECT current_timestamp() as current_time").select(date_format("current_time", "dd HH:mm:ss"))
-            current_time_value = current_date_time_df.first()[0]
-            print(f"""***** Started Spark Job for PATTERN - {SUBSCRIBE_PATTERN} at {current_time_value} *****""")
-            result = requests.get(f"{SUBSCRIBE_PATTERN}")
-            topics = []
-            for topic in result.json()['topics']:
-                topics.append(topic['name'])
+            print(f"""***** Started Spark Job for PATTERN - {SUBSCRIBE_PATTERN} at {get_curr_datetime()} *****""")
             subscribe_pattern = '' + SUBSCRIBE_PATTERN
             checkpoint_location =  '' + CHECKPOINT_LOCATION
             # table_list = set(spark.sql("show tables from "+ catalog + "." +db).select('tableName').rdd.flatMap(lambda x: x).collect())
             table_list = ['sales']
             topic_dict = {}
             dtopic_dict = {}
-            for topic in topics:
-                subscribe_pattern = topic
-                checkpoint_location = CHECKPOINT_LOCATION +  "/" + topic
+            for table in table_list:
+                subscribe_pattern = SUBSCRIBE_PATTERN + "." + table
+                checkpoint_location = CHECKPOINT_LOCATION +  "/" + table
                 topic_dict[subscribe_pattern] = checkpoint_location
-                dtopic = topic.strip().split('.')[1]
-                if dtopic in dtopic_dict:
-                    dtopic_dict[dtopic].append(topic)
-                else:
-                    dtopic_dict[dtopic] = [topic]
-        
             with ThreadPoolExecutor(max_workers=40) as executor:
                 result_futures = [executor.submit(run_job, topic, loc) for topic,loc in topic_dict.items()]
                 wait(result_futures)
                 for future in as_completed(result_futures):
                     print(future.result())
             sleep(10)            
-            current_date_time_df = spark.sql("SELECT current_timestamp() as current_time").select(date_format("current_time", "dd HH:mm:ss"))
-            current_time_value = current_date_time_df.first()[0]
-            print(f""" ***** Finished Spark Job for PATTERN - {SUBSCRIBE_PATTERN} at {current_time_value} ***** """)
+            print(f""" ***** Finished Spark Job for PATTERN - {SUBSCRIBE_PATTERN} at {get_curr_datetime()} ***** """)
             
